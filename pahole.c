@@ -742,6 +742,7 @@ ARGP_PROGRAM_VERSION_HOOK_DEF = dwarves_print_version;
 #define ARGP_first_obj_only	   303
 #define ARGP_classes_as_structs	   304
 #define ARGP_hex_fmt		   305
+#define ARGP_hide_this_ptr	   306
 
 static const struct argp_option pahole__options[] = {
 	{
@@ -965,6 +966,11 @@ static const struct argp_option pahole__options[] = {
 		.doc  = "Print offsets and sizes in hexadecimal",
 	},
 	{
+		.name = "hide_this_ptr",
+		.key  = ARGP_hide_this_ptr,
+		.doc  = "Don't print this ptr(usually first argument) in class methods, produce valid syntax of constructors and destructors",
+	},
+	{
 		.name = NULL,
 	}
 };
@@ -1043,6 +1049,8 @@ static error_t pahole__options_parser(int key, char *arg,
 		conf.classes_as_structs = 1;		break;
 	case ARGP_hex_fmt:
 		conf.hex_fmt = 1;			break;
+	case ARGP_hide_this_ptr:
+		conf.hide_this_ptr = 1;			break;
 	default:
 		return ARGP_ERR_UNKNOWN;
 	}

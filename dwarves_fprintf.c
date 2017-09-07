@@ -134,6 +134,17 @@ static const struct conf_fprintf conf_fprintf__defaults = {
 static const char tabs[] = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
 
 static size_t cacheline_size;
+static int printing_class = 0;
+static const char *printing_class_name = NULL;
+
+#define is_printing_class() (printing_class && printing_class_name)
+
+static int is_destructor_name(const char *name)
+{
+	if (*name == '~' && !strcmp(name + 1, printing_class_name))
+		return 1;
+	return 0;
+}
 
 size_t tag__nr_cachelines(const struct tag *tag, const struct cu *cu)
 {
@@ -908,6 +919,7 @@ size_t ftype__fprintf_parms(const struct ftype *ftype,
 	struct tag *type;
 	const char *name, *stype;
 	size_t printed = fprintf(fp, "(");
+	int check_for_this = 0;
 
 	ftype__for_each_parameter(ftype, pos) {
 		if (!first_parm) {
@@ -916,8 +928,12 @@ size_t ftype__fprintf_parms(const struct ftype *ftype,
 			else
 				printed += fprintf(fp, ",\n%.*s",
 						   indent, tabs);
-		} else
+			check_for_this = 0;
+		} else {
 			first_parm = 0;
+			if (conf->hide_this_ptr && is_printing_class())
+				check_for_this = 1;
+		}
 		name = conf->no_parm_names ? NULL : parameter__name(pos, cu);
 		type = cu__type(cu, pos->tag.type);
 		if (type == NULL) {
@@ -925,7 +941,7 @@ size_t ftype__fprintf_parms(const struct ftype *ftype,
 				 "<ERROR: type %d not found>", pos->tag.type);
 			stype = sbf;
 			goto print_it;
-		}
+		} 
 		if (type->tag == DW_TAG_pointer_type) {
 			if (type->type != 0) {
 				int n;
@@ -952,6 +968,17 @@ size_t ftype__fprintf_parms(const struct ftype *ftype,
 			continue;
 		}
 		stype = tag__name(type, cu, sbf, sizeof(sbf), conf);
+		if (check_for_this)
+		{
+			// pointer to this class
+			if (strstr(stype, "class ") &&
+				strstr(stype, printing_class_name) &&
+				type->tag == DW_TAG_pointer_type)
+			{
+				first_parm = 1;
+				continue;
+			}
+		}
 print_it:
 		printed += fprintf(fp, "%s%s%s", stype, name ? " " : "",
 				   name ?: "");
@@ -1086,15 +1113,35 @@ size_t ftype__fprintf(const struct ftype *ftype, const struct cu *cu,
 	struct tag *type = cu__type(cu, ftype->tag.type);
 	char sbf[128];
 	const char *stype = tag__name(type, cu, sbf, sizeof(sbf), conf);
-	size_t printed = fprintf(fp, "%s%-*s %s%s%s%s",
-				 inlined ? "inline " : "",
-				 type_spacing, stype,
-				 ftype->tag.tag == DW_TAG_subroutine_type ?
-					"(" : "",
-				 is_pointer ? "*" : "", name ?: "",
-				 ftype->tag.tag == DW_TAG_subroutine_type ?
-					")" : "");
-
+	size_t printed;
+	int is_destructor = 0;
+	if (conf->hide_this_ptr && is_printing_class() && 
+		!strcmp(stype, "void") &&
+		(!strcmp(name, printing_class_name) || is_destructor_name(name))) // this maybe a constructor
+	{
+		is_destructor = is_destructor_name(name);
+		
+		printed = fprintf(fp, "%s%-*s%s%s%s",
+			inlined ? "inline " : "",
+			type_spacing,
+			ftype->tag.tag == DW_TAG_subroutine_type ? "(" : "",
+			is_pointer ? "*" : "", name ?: "",
+			ftype->tag.tag == DW_TAG_subroutine_type ? ")" : "");
+		
+	}
+	else
+	{
+		printed = fprintf(fp, "%s%-*s %s%s%s%s",
+					inlined ? "inline " : "",
+					type_spacing, stype,
+					ftype->tag.tag == DW_TAG_subroutine_type ?
+						"(" : "",
+					is_pointer ? "*" : "", name ?: "",
+					ftype->tag.tag == DW_TAG_subroutine_type ?
+						")" : "");
+	}
+	if (is_destructor)
+		return (printed += fprintf(fp, "()")); // destructors does not have args
 	return printed + ftype__fprintf_parms(ftype, cu, 0, conf, fp);
 }
 
@@ -1114,7 +1161,7 @@ static size_t function__fprintf(const struct tag *tag, const struct cu *cu,
 
 	if (func->virtuality == DW_VIRTUALITY_pure_virtual)
 		printed += fprintf(fp, " = 0");
-
+	
 	return printed;
 }
 
@@ -1210,6 +1257,7 @@ static size_t __class__fprintf(struct class *class, const struct cu *cu,
 	const char *current_accessibility = NULL;
 	struct conf_fprintf cconf = conf ? *conf : conf_fprintf__defaults;
 	const uint16_t t = type->namespace.tag.tag;
+	const char *classname = type__name(type, cu);
 	size_t printed = fprintf(fp, "%s%s%s%s%s",
 				 cconf.prefix ?: "", cconf.prefix ? " " : "",
 				 ((cconf.classes_as_structs ||
@@ -1219,6 +1267,8 @@ static size_t __class__fprintf(struct class *class, const struct cu *cu,
 				 type__name(type, cu) ? " " : "",
 				 type__name(type, cu) ?: "");
 	int indent = cconf.indent;
+	
+	printing_class++;
 
 	if (indent >= (int)sizeof(tabs))
 		indent = sizeof(tabs) - 1;
@@ -1277,6 +1327,7 @@ static size_t __class__fprintf(struct class *class, const struct cu *cu,
 		if (tag_pos->tag != DW_TAG_member &&
 		    tag_pos->tag != DW_TAG_inheritance) {
 			if (!cconf.show_only_data_members) {
+				printing_class_name = classname;
 				printed += tag__fprintf(tag_pos, cu, &cconf, fp);
 				printed += fprintf(fp, "\n\n");
 			}
@@ -1480,12 +1531,11 @@ static size_t __class__fprintf(struct class *class, const struct cu *cu,
 	if (!cconf.emit_stats)
 		goto out;
 
-	printed += fprintf(fp, "\n%.*s/* size: %d, cachelines: %zd, members: %u",
+	printed += fprintf(fp, "\n%.*s/* size: %d, cachelines: %zd, members: %u"
 			   cconf.indent, tabs,
 			   class__size(class),
 			   tag__nr_cachelines(class__tag(class), cu),
-			   type->nr_members,
-			   type->nr_static_members);
+			   type->nr_members);
 
 	if (type->nr_static_members != 0) {
 		printed += fprintf(fp, ", static members: %u */",
@@ -1541,6 +1591,8 @@ static size_t __class__fprintf(struct class *class, const struct cu *cu,
 				   type->size - (sum + sum_holes));
 	fputc('\n', fp);
 out:
+	printing_class--;
+	printing_class_name = NULL;
 	return printed + fprintf(fp, "%.*s}%s%s", indent, tabs,
 				 cconf.suffix ? " ": "", cconf.suffix ?: "");
 }
